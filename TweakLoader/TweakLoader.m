@@ -3,6 +3,7 @@
 #include <dlfcn.h>
 #include <objc/runtime.h>
 #import "../LiveContainer/utils.h"
+#import "LCGuestDisplayProbe.h"
 
 static NSString *loadTweakAtURL(NSURL *url) {
     NSString *tweakPath = url.path;
@@ -78,6 +79,15 @@ static void showDlerrAlert(NSString *error) {
 
  __attribute__((constructor))
 static void TweakLoaderConstructor() {
+    // Opt-in via a three-finger hold in a multitasking guest. Nothing is served
+    // until that gesture; each guest has its own random port and access token.
+    if (NSUserDefaults.isLiveProcess) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            static LCGuestDisplayProbe *probe;
+            probe = [LCGuestDisplayProbe new];
+            [probe install];
+        });
+    }
     const char *tweakFolderC = getenv("LC_GLOBAL_TWEAKS_FOLDER");
     NSString *globalTweakFolder = @(tweakFolderC);
     unsetenv("LC_GLOBAL_TWEAKS_FOLDER");

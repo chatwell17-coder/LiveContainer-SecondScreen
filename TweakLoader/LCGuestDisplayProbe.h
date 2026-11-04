@@ -7,6 +7,7 @@
 #include <ifaddrs.h>
 #include <unistd.h>
 #include <errno.h>
+#include <math.h>
 
 @interface LCGuestDisplayProbe : NSObject
 @property(nonatomic, weak) UIWindow *window;
@@ -31,6 +32,47 @@ static BOOL LCProbeSend(int fd, NSData *data) {
 }
 
 @implementation LCGuestDisplayProbe
+- (UIView *)inputResponder:(UIView *)view {
+    if (view.isFirstResponder && [view conformsToProtocol:@protocol(UIKeyInput)]) return view;
+    for (UIView *child in view.subviews) {
+        UIView *found = [self inputResponder:child];
+        if (found) return found;
+    }
+    return nil;
+}
+- (BOOL)applyInput:(NSDictionary *)input {
+    NSString *kind = input[@"kind"];
+    if ([kind isEqual:@"click"] || [kind isEqual:@"scroll"]) {
+        double x = [input[@"x"] doubleValue], y = [input[@"y"] doubleValue];
+        if (!isfinite(x) || !isfinite(y) || x < 0 || x > 1 || y < 0 || y > 1) return NO;
+        UIView *hit = [self.window hitTest:CGPointMake(x * self.window.bounds.size.width, y * self.window.bounds.size.height) withEvent:nil];
+        for (UIView *view = hit; view; view = view.superview) {
+            if ([kind isEqual:@"scroll"] && [view isKindOfClass:UIScrollView.class]) {
+                UIScrollView *scroll = (UIScrollView *)view;
+                CGFloat dy = MAX(-500, MIN(500, [input[@"dy"] doubleValue]));
+                CGFloat top = -scroll.adjustedContentInset.top;
+                CGFloat bottom = MAX(top, scroll.contentSize.height - scroll.bounds.size.height + scroll.adjustedContentInset.bottom);
+                [scroll setContentOffset:CGPointMake(scroll.contentOffset.x, MAX(top, MIN(bottom, scroll.contentOffset.y + dy))) animated:NO];
+                return YES;
+            }
+            if ([kind isEqual:@"click"]) {
+                if ([view isKindOfClass:UIControl.class] && ((UIControl *)view).enabled) {
+                    [(UIControl *)view sendActionsForControlEvents:UIControlEventTouchUpInside];
+                    return YES;
+                }
+                if (view.canBecomeFirstResponder) return [view becomeFirstResponder];
+                if (view.isAccessibilityElement && [view accessibilityActivate]) return YES;
+            }
+        }
+        return NO;
+    }
+    UIView *target = [self inputResponder:self.window];
+    NSString *text = input[@"text"];
+    if (!target || ![text isKindOfClass:NSString.class] || text.length > 1024) return NO;
+    if ([input[@"key"] isEqual:@"Backspace"]) [(id<UIKeyInput>)target deleteBackward];
+    else [(id<UIKeyInput>)target insertText:text];
+    return YES;
+}
 - (instancetype)init {
     if ((self = [super init])) _listener = -1;
     return self;
@@ -124,7 +166,7 @@ static BOOL LCProbeSend(int fd, NSData *data) {
         }];
         self.frame = rendered ? UIImageJPEGRepresentation(image, 0.65) : nil;
     }];
-    NSString *html = [NSString stringWithFormat:@"<!doctype html><meta name='viewport' content='width=device-width'><title>Guest display probe</title><style>body{background:#151515;color:white;font:16px system-ui;text-align:center}img{max-width:95vw;max-height:80vh}p{margin:12px}</style><h1>Guest display probe</h1><p>View only · 2 frames/second · keep LiveContainer open on the phone</p><p id='s'>Waiting for guest frame…</p><img id='f' alt='Selected guest app'><script>const f=document.getElementById('f'),s=document.getElementById('s');let old;async function tick(){try{const r=await fetch('%@',{cache:'no-store',signal:AbortSignal.timeout(4000)});if(!r.ok)throw Error(r.status);const u=URL.createObjectURL(await r.blob());f.src=u;if(old)URL.revokeObjectURL(old);old=u;s.textContent='Received '+new Date().toLocaleTimeString();}catch(e){s.textContent='No frame: '+e.message;}setTimeout(tick,500)}tick()</script>", framePath];
+    NSString *html = [NSString stringWithFormat:@"<!doctype html><meta name='viewport' content='width=device-width'><title>Guest display probe</title><style>body{background:#151515;color:white;font:16px system-ui;text-align:center}img{max-width:95vw;max-height:80vh}p{margin:12px}</style><h1>Guest display probe</h1><p>Experimental text, control clicks and scroll · 2 frames/second · keep LiveContainer open on the phone</p><p id='s'>Waiting for guest frame…</p><img id='f' alt='Selected guest app'><script>const f=document.getElementById('f'),s=document.getElementById('s');let old;async function tick(){try{const r=await fetch('%@',{cache:'no-store',signal:AbortSignal.timeout(4000)});if(!r.ok)throw Error(r.status);const u=URL.createObjectURL(await r.blob());f.src=u;if(old)URL.revokeObjectURL(old);old=u;s.textContent='Received '+new Date().toLocaleTimeString();}catch(e){s.textContent='No frame: '+e.message;}setTimeout(tick,500)}tick();const box=document.createElement('input'),button=document.createElement('button');box.placeholder='Text for focused guest field';button.textContent='Send';document.body.append(box,button);button.onclick=async()=>{const q=new URLSearchParams({text:box.value+'\\n'});const r=await fetch(location.pathname+'/input?'+q,{method:'POST'});s.textContent=r.ok?'Text sent':'Guest has no focused text field';if(r.ok)box.value='';};box.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();button.click();}};async function pointer(kind,e,dy=0){const r=f.getBoundingClientRect();const q=new URLSearchParams({kind,x:(e.clientX-r.left)/r.width,y:(e.clientY-r.top)/r.height,dy});const v=await fetch(location.pathname+'/input?'+q,{method:'POST'});if(!v.ok)s.textContent='This guest control does not support remote input';}f.onclick=e=>pointer('click',e);f.onwheel=e=>{e.preventDefault();pointer('scroll',e,e.deltaY);};</script>", framePath];
     NSData *page = [html dataUsingEncoding:NSUTF8StringEncoding];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         for (;;) {
@@ -152,6 +194,15 @@ static BOOL LCProbeSend(int fd, NSData *data) {
                     if ([parts[1] isEqual:path]) { body = page; type = @"text/html; charset=utf-8"; status = 200; }
                     else if ([parts[1] isEqual:framePath]) { NSData *snapshot = self.frame; if (snapshot) { body = snapshot; type = @"image/jpeg"; status = 200; } else status = 503; }
                 }
+                NSString *inputPrefix = [path stringByAppendingString:@"/input?"];
+                if (parts.count == 3 && [parts[0] isEqual:@"POST"] && [parts[1] hasPrefix:inputPrefix]) {
+                    NSURLComponents *components = [NSURLComponents componentsWithString:[@"http://guest" stringByAppendingString:parts[1]]];
+                    NSMutableDictionary *input = [NSMutableDictionary dictionary];
+                    for (NSURLQueryItem *item in components.queryItems) if (item.value) input[item.name] = item.value;
+                    __block BOOL applied = NO;
+                    dispatch_sync(dispatch_get_main_queue(), ^{ applied = [self applyInput:input]; });
+                    status = applied ? 200 : 409;
+                }
                 NSString *header = [NSString stringWithFormat:@"HTTP/1.1 %d %@\r\nContent-Type: %@\r\nContent-Length: %lu\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n", status, status == 200 ? @"OK" : @"Unavailable", type, (unsigned long)body.length];
                 if (LCProbeSend(client, [header dataUsingEncoding:NSUTF8StringEncoding])) LCProbeSend(client, body);
                 close(client);
@@ -159,6 +210,6 @@ static BOOL LCProbeSend(int fd, NSData *data) {
         }
         close(fd);
     });
-    [self message:[NSString stringWithFormat:@"Open this address on your PC on the same network:\n\n%@\n\nThree-finger hold again to stop. Anyone with this address on your network can view this guest. HTTP is unencrypted. This is a capture experiment, with no remote input yet.", url] onWindow:window];
+    [self message:[NSString stringWithFormat:@"Open this address on your PC on the same network:\n\n%@\n\nThree-finger hold again to stop. Anyone with this address on your network can view this guest. HTTP is unencrypted. This is a capture experiment, with experimental remote input enabled.", url] onWindow:window];
 }
 @end

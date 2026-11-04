@@ -1,0 +1,37 @@
+name: Build guest display probe
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '26.2'
+      - name: Build unsigned device archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild archive -project LiveContainer.xcodeproj -scheme LiveContainer -archivePath archive -sdk iphoneos -arch arm64 -configuration Release CODE_SIGNING_ALLOWED=NO 2>&1 | tee build.log
+      - name: Package IPAs using upstream script
+        shell: bash
+        env:
+          archive_path: archive
+          scheme: LiveContainer
+        run: bash .github/build_github.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Guest-display-probe-IPAs
+          path: '*.ipa'
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Build-log
+          path: build.log

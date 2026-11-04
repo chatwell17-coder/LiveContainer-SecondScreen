@@ -166,7 +166,7 @@ static BOOL LCProbeSend(int fd, NSData *data) {
         }];
         self.frame = rendered ? UIImageJPEGRepresentation(image, 0.65) : nil;
     }];
-    NSString *html = [NSString stringWithFormat:@"<!doctype html><meta name='viewport' content='width=device-width'><title>Guest display probe</title><style>body{background:#151515;color:white;font:16px system-ui;text-align:center}img{max-width:95vw;max-height:80vh}p{margin:12px}</style><h1>Guest display probe</h1><p>Experimental text, control clicks and scroll · 2 frames/second · keep LiveContainer open on the phone</p><p id='s'>Waiting for guest frame…</p><img id='f' alt='Selected guest app'><script>const f=document.getElementById('f'),s=document.getElementById('s');let old;async function tick(){try{const r=await fetch('%@',{cache:'no-store',signal:AbortSignal.timeout(4000)});if(!r.ok)throw Error(r.status);const u=URL.createObjectURL(await r.blob());f.src=u;if(old)URL.revokeObjectURL(old);old=u;s.textContent='Received '+new Date().toLocaleTimeString();}catch(e){s.textContent='No frame: '+e.message;}setTimeout(tick,500)}tick();const box=document.createElement('input'),button=document.createElement('button');box.placeholder='Text for focused guest field';button.textContent='Send';document.body.append(box,button);button.onclick=async()=>{const q=new URLSearchParams({text:box.value+'\\n'});const r=await fetch(location.pathname+'/input?'+q,{method:'POST'});s.textContent=r.ok?'Text sent':'Guest has no focused text field';if(r.ok)box.value='';};box.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();button.click();}};async function pointer(kind,e,dy=0){const r=f.getBoundingClientRect();const q=new URLSearchParams({kind,x:(e.clientX-r.left)/r.width,y:(e.clientY-r.top)/r.height,dy});const v=await fetch(location.pathname+'/input?'+q,{method:'POST'});if(!v.ok)s.textContent='This guest control does not support remote input';}f.onclick=e=>pointer('click',e);f.onwheel=e=>{e.preventDefault();pointer('scroll',e,e.deltaY);};</script>", framePath];
+    NSString *html = [NSString stringWithFormat:@"<!doctype html><meta name=\"viewport\" content=\"width=device-width\"><title>Guest display</title><style>body{background:#151515;color:white;font:16px system-ui;text-align:center}img{max-width:95vw;max-height:75vh}input{width:65vw}button,input{padding:10px;margin:4px}#control{position:sticky;bottom:0;background:#222}</style><h1>Guest display</h1><p>Experimental input · keep LiveContainer open</p><p id=\"s\">Connecting…</p><img id=\"f\" alt=\"Selected guest app\"><div id=\"control\"><input id=\"text\" maxlength=\"1024\" placeholder=\"Text or terminal command\"><button id=\"send\">Send text</button><button id=\"run\">Send + Enter</button><button id=\"back\">Backspace</button><button id=\"enter\">Enter</button><p id=\"result\">Click the guest text field first. Custom touch gestures are unsupported.</p></div><script>const f=document.getElementById('f'),s=document.getElementById('s'),box=document.getElementById('text'),result=document.getElementById('result');let old;async function tick(){try{const r=await fetch('%@',{cache:'no-store',signal:AbortSignal.timeout(4000)});if(!r.ok)throw Error(r.status);const u=URL.createObjectURL(await r.blob());f.src=u;if(old)URL.revokeObjectURL(old);old=u;s.textContent='Received '+new Date().toLocaleTimeString();}catch(e){s.textContent='No frame: '+e.message;}setTimeout(tick,500)}tick();let queue=Promise.resolve();function send(data){queue=queue.catch(()=>{}).then(async()=>{try{const q=new URLSearchParams(data);const r=await fetch(location.pathname+'/input?'+q,{method:'POST',signal:AbortSignal.timeout(5000)});if(!r.ok)throw Error('Guest control unavailable ('+r.status+')');result.textContent='Input delivered';}catch(e){result.textContent=e.message;throw e;}});return queue;}document.getElementById('send').onclick=()=>send({text:box.value}).then(()=>box.value='').catch(()=>{});document.getElementById('run').onclick=()=>send({text:box.value+String.fromCharCode(10)}).then(()=>box.value='').catch(()=>{});document.getElementById('enter').onclick=()=>send({text:String.fromCharCode(10)}).catch(()=>{});document.getElementById('back').onclick=()=>send({text:'',key:'Backspace'}).catch(()=>{});box.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();document.getElementById('run').click();}};function pointer(kind,e,dy=0){const r=f.getBoundingClientRect();send({kind,x:(e.clientX-r.left)/r.width,y:(e.clientY-r.top)/r.height,dy}).catch(()=>{});}f.onclick=e=>pointer('click',e);f.addEventListener('wheel',e=>{e.preventDefault();pointer('scroll',e,Math.max(-500,Math.min(500,e.deltaY)));},{passive:false});</script>", framePath];
     NSData *page = [html dataUsingEncoding:NSUTF8StringEncoding];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         for (;;) {
@@ -180,13 +180,13 @@ static BOOL LCProbeSend(int fd, NSData *data) {
                 setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
                 NSMutableData *request = [NSMutableData data];
                 NSString *line = nil;
-                while (request.length < 4096 && !line) {
+                while (request.length < 16384 && !line) {
                     char buffer[512];
                     ssize_t n = recv(client, buffer, sizeof(buffer), 0);
                     if (n <= 0) break;
                     [request appendBytes:buffer length:(NSUInteger)n];
                     NSString *text = [[NSString alloc] initWithData:request encoding:NSUTF8StringEncoding];
-                    if ([text containsString:@"\r\n"]) line = [text componentsSeparatedByString:@"\r\n"].firstObject;
+                    if (request.length <= 16384 && [text containsString:@"\r\n"]) line = [text componentsSeparatedByString:@"\r\n"].firstObject;
                 }
                 NSArray *parts = [line componentsSeparatedByString:@" "];
                 NSData *body = [NSData data]; NSString *type = @"text/plain"; int status = 404;
@@ -196,7 +196,10 @@ static BOOL LCProbeSend(int fd, NSData *data) {
                 }
                 NSString *inputPrefix = [path stringByAppendingString:@"/input?"];
                 if (parts.count == 3 && [parts[0] isEqual:@"POST"] && [parts[1] hasPrefix:inputPrefix]) {
-                    NSURLComponents *components = [NSURLComponents componentsWithString:[@"http://guest" stringByAppendingString:parts[1]]];
+                    // URLSearchParams uses form encoding: decode raw '+' as space,
+                    // while preserving a literal plus encoded as %2B.
+                    NSString *encodedTarget = [parts[1] stringByReplacingOccurrencesOfString:@"+" withString:@"%20"];
+                    NSURLComponents *components = [NSURLComponents componentsWithString:[@"http://guest" stringByAppendingString:encodedTarget]];
                     NSMutableDictionary *input = [NSMutableDictionary dictionary];
                     for (NSURLQueryItem *item in components.queryItems) if (item.value) input[item.name] = item.value;
                     __block BOOL applied = NO;

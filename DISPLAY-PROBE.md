@@ -1,73 +1,52 @@
-# Guest display proof of concept
+# Independent guest display prototype
 
-Status: source prepared; not compiled or tested on an iPhone. This is NOT a
-completed second-screen implementation. No remote input or audio is implemented.
+Baseline: LiveContainer 3.8.11 (9108ae624ea001f7d7696d48407f890b48fa2653).
 
-Upstream baseline: 9108ae624ea001f7d7696d48407f890b48fa2653 (LiveContainer 3.8.11).
+## Verified on the iPhone
 
-## Design and limits
+The selected iSH guest streams its own window to Windows at about two frames per
+second. It continues updating minimised while another guest is used on the phone.
+Text with spaces and literal plus signs, Send + Enter, Enter, and Backspace passed
+on-device checks. This captures the selected guest, not the whole phone screen.
 
-Each multitasking guest runs in a LiveProcess extension. TweakLoader installs
-an opt-in three-finger long-press gesture inside that guest. Activating it starts
-a small HTTP listener bound to the phone's Wi-Fi IPv4 address, with an ephemeral
-port and random per-session URL token. The browser page polls JPEG frames at
-roughly 2 fps. The capture happens inside the guest's UIKit window, not in the
-LiveContainer host and not through whole-screen recording or AirPlay.
+## Experimental touch update: requires device validation
 
-This avoids the host's remote scene surface, which ordinary host view snapshots
-may fail to capture. However drawViewHierarchy can still miss WKWebView, GPU or
-protected content. Minimised guest rendering, timer scheduling, and sandbox
-network permissions are unproven. A changing red capture stamp alone proves
-only that the timer runs; it does not prove the guest UI is still rendering.
+Mouse down/move/up become one synthetic touch inside this guest. Private UIKit
+selectors and locally constructed HID objects follow the in-process approach
+used by KIF. No system-wide input dispatch or accessibility settings are changed.
+Missing selectors/symbols return HTTP 409. Browser focus loss cancels the gesture;
+an idle touch cancels after three seconds. SwiftUI hit testing uses the private
+_UIHitTestContext when available. Dispatch success does not prove an app action.
 
-LiveContainer must remain foreground on the phone for this experiment. The
-second phone app must be another LiveContainer guest. Switching to an arbitrary
-Home Screen app or locking the phone is outside this prototype's scope.
+Use Show/hide touch test in the PC viewer. Click and drag in the blue area and
+move its slider. Both the label and slider must visibly respond. Hide the panel
+before testing a real graphical app. Untick Experimental touch for basic button
+activation. Wheel scrolling still directly adjusts a hit UIScrollView.
 
-## Build
+Multi-touch, audio, GPU/protected video capture, and arbitrary Home Screen apps
+are not implemented. LiveContainer must remain open; the second phone app must
+be another LiveContainer guest. Updating the red counter alone is not evidence
+that app content continues rendering.
 
-Use a fork under your GitHub account; the supplied workflow creates artifacts,
-not a public release. Run `Build guest display probe` from the branch containing
-these changes. It uses the upstream Xcode version and packaging script. The
-packaging script fetches the upstream SideStore nightly and dylibify, so those
-dependencies are not fully reproducible. Never put Apple account credentials or
-signing certificates in Actions. Download and sign the resulting IPA locally
-using iLoader, as with upstream LiveContainer. A successful build is not proof
-of on-device functionality.
+## Build and packaging
 
-## Device acceptance test
+The manual Build guest display probe workflow exports GuestDisplayTouch.dylib.
+It avoids the upstream packaging script, which previously produced a combined
+IPA missing the SideStore executable. Run scripts/package-touch-probe.ps1 with
+-Module pointing to the downloaded dylib. It checks the working base IPA hash,
+replaces only TweakLoader, and verifies required executables. Sign with iLoader.
+Keep the previous IPA for rollback. No signing credentials enter GitHub.
+The original automatic build is skipped in this fork to avoid duplicate jobs.
 
-1. Keep your original IPA available for rollback. Install the built combined
-   LiveContainer+SideStore IPA using your existing Apple account and bundle ID.
-   Repeat certificate import/diagnostics if signing changes.
-2. Run iSH in Multitask mode. In its terminal run:
+Run node scripts/verify-guest-viewer.cjs to test the actual embedded JavaScript:
+text encoding, touch order, coordinates, cancellation, and basic control fallback.
+Apple compilation and physical-device tests are separate required checks.
 
-       while true; do date; sleep 1; done
+## Sharing
 
-3. Hold three fingers inside the iSH window for 1.2 seconds. The alert shows a
-   session URL. Open that URL in a Windows browser on the same network, then
-   dismiss the alert. Allow local-network access if prompted.
-4. Confirm the terminal's dates change on the PC. Then minimise THIS iSH window
-   using LiveContainer's yellow minus, leaving its process running.
-5. Open the second iSH container on the phone. Type `echo PHONE ONLY` there.
-   PASS: the PC continues showing changing dates from the first iSH while the
-   phone shows the second terminal, and PHONE ONLY never appears on the PC.
-   FAIL: black frames, frozen dates, entire-phone capture, or the first guest
-   terminates. Record which outcome occurred; don't alter unrelated settings.
-6. Restore the first iSH window and hold three fingers again to stop sharing.
-   The session URL should cease responding. Killing that guest also stops it.
-
-## Security and resource boundaries
-
-Sharing is off by default. Only the selected guest's normal-level UIWindow is
-captured. No login, credentials, files or touch events are accepted from clients.
-The random URL is a bearer token; anyone with it on the LAN can view this guest.
-HTTP is unencrypted, so use a trusted LAN and a non-sensitive test app. There is
-no cloud relay or persistent pairing. Requests have bounded size and socket
-timeouts. Port forwarding is neither required nor part of the design.
-
-## Next milestone, only after acceptance passes
-
-Implement guest-specific keyboard/touch forwarding with explicit pairing and
-input consent. UIKit view capture does not itself provide remote input; that
-requires a separate feasibility test. Improve frame rate and encoding later.
+Run a guest in Multitask mode; hold three fingers inside it for 1.2 seconds.
+Open the displayed address on the PC and dismiss the phone alert. Repeat the
+hold to stop. Each session changes its port and random bearer token. Sharing is
+off until requested and bound to Wi-Fi. Anyone with that URL on the LAN can view
+and control the guest. HTTP is unencrypted; there is no cloud relay. Requests
+and socket waits are bounded.

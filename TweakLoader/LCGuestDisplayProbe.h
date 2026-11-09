@@ -8,6 +8,24 @@
 #include <unistd.h>
 #include <errno.h>
 #include <math.h>
+#import "LCRemoteTouch.h"
+
+@interface LCRemoteTestView : UIView
+@property(nonatomic, strong) UILabel *status;
+@property(nonatomic) NSUInteger taps;
+@end
+@implementation LCRemoteTestView
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    self.taps++;
+    self.status.text = [NSString stringWithFormat:@"Touch began: %lu", (unsigned long)self.taps];
+}
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    CGPoint p = [touches.anyObject locationInView:self];
+    self.status.text = [NSString stringWithFormat:@"Dragging: %.0f, %.0f", p.x, p.y];
+}
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { self.status.text = @"Touch ended"; }
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { self.status.text = @"Touch cancelled"; }
+@end
 
 @interface LCGuestDisplayProbe : NSObject
 @property(nonatomic, weak) UIWindow *window;
@@ -16,6 +34,9 @@
 @property(atomic, copy) NSData *frame;
 @property(nonatomic) int listener;
 @property(nonatomic) NSUInteger sequence;
+@property(nonatomic, strong) UITouch *remoteTouch;
+@property(nonatomic, strong) NSTimer *touchTimeout;
+@property(nonatomic, strong) UIView *testPanel;
 @end
 
 static BOOL LCProbeSend(int fd, NSData *data) {
@@ -32,6 +53,28 @@ static BOOL LCProbeSend(int fd, NSData *data) {
 }
 
 @implementation LCGuestDisplayProbe
+- (void)cancelTouch {
+    [self.touchTimeout invalidate]; self.touchTimeout = nil;
+    UITouch *touch = self.remoteTouch; self.remoteTouch = nil;
+    if (touch) {
+        @try { LCRemoteDeliver(touch, [touch locationInView:touch.window], UITouchPhaseCancelled); }
+        @catch (NSException *exception) { NSLog(@"Guest touch cancellation failed: %@", exception.name); }
+    }
+}
+- (void)showInputTest {
+    if (self.testPanel) { [self.testPanel removeFromSuperview]; self.testPanel = nil; return; }
+    LCRemoteTestView *panel = [[LCRemoteTestView alloc] initWithFrame:CGRectInset(self.window.bounds, 12, 50)];
+    panel.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    panel.backgroundColor = [UIColor colorWithRed:0.08 green:0.2 blue:0.35 alpha:1];
+    UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(12, 12, panel.bounds.size.width - 24, 100)];
+    label.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    label.textColor = UIColor.whiteColor; label.numberOfLines = 0;
+    label.text = @"Touch test: click or drag the blue area. Drag the slider below.";
+    [panel addSubview:label]; panel.status = label;
+    UISlider *slider = [[UISlider alloc] initWithFrame:CGRectMake(16, 130, panel.bounds.size.width - 32, 50)];
+    slider.autoresizingMask = UIViewAutoresizingFlexibleWidth; [panel addSubview:slider];
+    [self.window addSubview:panel]; self.testPanel = panel;
+}
 - (UIView *)inputResponder:(UIView *)view {
     if (view.isFirstResponder && [view conformsToProtocol:@protocol(UIKeyInput)]) return view;
     for (UIView *child in view.subviews) {
@@ -42,6 +85,32 @@ static BOOL LCProbeSend(int fd, NSData *data) {
 }
 - (BOOL)applyInput:(NSDictionary *)input {
     NSString *kind = input[@"kind"];
+    if ([kind isEqual:@"test"]) { [self cancelTouch]; [self showInputTest]; return YES; }
+    if ([kind isEqual:@"touch"]) {
+        NSString *phase = input[@"phase"];
+        if ([phase isEqual:@"cancelled"]) { [self cancelTouch]; return YES; }
+        if (!input[@"x"] || !input[@"y"]) return NO;
+        double x = [input[@"x"] doubleValue], y = [input[@"y"] doubleValue];
+        if (!isfinite(x) || !isfinite(y) || x < 0 || x > 1 || y < 0 || y > 1) return NO;
+        CGPoint point = CGPointMake(self.window.bounds.origin.x + x * self.window.bounds.size.width,
+                                    self.window.bounds.origin.y + y * self.window.bounds.size.height);
+        @try {
+            UITouchPhase state;
+            if ([phase isEqual:@"began"]) {
+                [self cancelTouch];
+                self.remoteTouch = LCRemoteBegin(self.window, point); state = UITouchPhaseBegan;
+            } else if ([phase isEqual:@"moved"]) state = UITouchPhaseMoved;
+            else if ([phase isEqual:@"ended"]) state = UITouchPhaseEnded;
+            else return NO;
+            if (!LCRemoteDeliver(self.remoteTouch, point, state)) { [self cancelTouch]; return NO; }
+            [self.touchTimeout invalidate]; self.touchTimeout = nil;
+            if (state == UITouchPhaseEnded) self.remoteTouch = nil;
+            else self.touchTimeout = [NSTimer scheduledTimerWithTimeInterval:3 repeats:NO block:^(NSTimer *timer) { [self cancelTouch]; }];
+            return YES;
+        } @catch (NSException *exception) {
+            NSLog(@"Guest touch unavailable: %@", exception.name); [self cancelTouch]; return NO;
+        }
+    }
     if ([kind isEqual:@"click"] || [kind isEqual:@"scroll"]) {
         double x = [input[@"x"] doubleValue], y = [input[@"y"] doubleValue];
         if (!isfinite(x) || !isfinite(y) || x < 0 || x > 1 || y < 0 || y > 1) return NO;
@@ -102,6 +171,8 @@ static BOOL LCProbeSend(int fd, NSData *data) {
     [vc presentViewController:alert animated:YES completion:nil];
 }
 - (void)stop {
+    [self cancelTouch];
+    [self.testPanel removeFromSuperview]; self.testPanel = nil;
     [self.captureTimer invalidate];
     self.captureTimer = nil;
     self.frame = nil;
@@ -166,7 +237,7 @@ static BOOL LCProbeSend(int fd, NSData *data) {
         }];
         self.frame = rendered ? UIImageJPEGRepresentation(image, 0.65) : nil;
     }];
-    NSString *html = [NSString stringWithFormat:@"<!doctype html><meta name=\"viewport\" content=\"width=device-width\"><title>Guest display</title><style>body{background:#151515;color:white;font:16px system-ui;text-align:center}img{max-width:95vw;max-height:75vh}input{width:65vw}button,input{padding:10px;margin:4px}#control{position:sticky;bottom:0;background:#222}</style><h1>Guest display</h1><p>Experimental input · keep LiveContainer open</p><p id=\"s\">Connecting…</p><img id=\"f\" alt=\"Selected guest app\"><div id=\"control\"><input id=\"text\" maxlength=\"1024\" placeholder=\"Text or terminal command\"><button id=\"send\">Send text</button><button id=\"run\">Send + Enter</button><button id=\"back\">Backspace</button><button id=\"enter\">Enter</button><p id=\"result\">Click the guest text field first. Custom touch gestures are unsupported.</p></div><script>const f=document.getElementById('f'),s=document.getElementById('s'),box=document.getElementById('text'),result=document.getElementById('result');let old;async function tick(){try{const r=await fetch('%@',{cache:'no-store',signal:AbortSignal.timeout(4000)});if(!r.ok)throw Error(r.status);const u=URL.createObjectURL(await r.blob());f.src=u;if(old)URL.revokeObjectURL(old);old=u;s.textContent='Received '+new Date().toLocaleTimeString();}catch(e){s.textContent='No frame: '+e.message;}setTimeout(tick,500)}tick();let queue=Promise.resolve();function send(data){queue=queue.catch(()=>{}).then(async()=>{try{const q=new URLSearchParams(data);const r=await fetch(location.pathname+'/input?'+q,{method:'POST',signal:AbortSignal.timeout(5000)});if(!r.ok)throw Error('Guest control unavailable ('+r.status+')');result.textContent='Input delivered';}catch(e){result.textContent=e.message;throw e;}});return queue;}document.getElementById('send').onclick=()=>send({text:box.value}).then(()=>box.value='').catch(()=>{});document.getElementById('run').onclick=()=>send({text:box.value+String.fromCharCode(10)}).then(()=>box.value='').catch(()=>{});document.getElementById('enter').onclick=()=>send({text:String.fromCharCode(10)}).catch(()=>{});document.getElementById('back').onclick=()=>send({text:'',key:'Backspace'}).catch(()=>{});box.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();document.getElementById('run').click();}};function pointer(kind,e,dy=0){const r=f.getBoundingClientRect();send({kind,x:(e.clientX-r.left)/r.width,y:(e.clientY-r.top)/r.height,dy}).catch(()=>{});}f.onclick=e=>pointer('click',e);f.addEventListener('wheel',e=>{e.preventDefault();pointer('scroll',e,Math.max(-500,Math.min(500,e.deltaY)));},{passive:false});</script>", framePath];
+    NSString *html = [NSString stringWithFormat:@"<!doctype html><meta name=\"viewport\" content=\"width=device-width\"><title>Guest display</title><style>body{background:#151515;color:white;font:16px system-ui;text-align:center}img{max-width:95vw;max-height:75vh;touch-action:none;user-select:none}input{width:65vw}button,input{padding:10px;margin:4px}#control{position:sticky;bottom:0;background:#222}</style><h1>Guest display</h1><p>Experimental input · keep LiveContainer open</p><p id=\"s\">Connecting…</p><img id=\"f\" alt=\"Selected guest app\"><div id=\"control\"><input id=\"text\" maxlength=\"1024\" placeholder=\"Text or terminal command\"><button id=\"send\">Send text</button><button id=\"run\">Send + Enter</button><button id=\"back\">Backspace</button><button id=\"enter\">Enter</button><button id=\"test\">Show/hide touch test</button><label><input id=\"touch\" type=\"checkbox\" checked style=\"width:auto\">Experimental touch</label><p id=\"result\">Click or drag the guest. Untick touch to use basic controls.</p></div><script>const f=document.getElementById('f'),s=document.getElementById('s'),box=document.getElementById('text'),result=document.getElementById('result');let old;async function tick(){try{const r=await fetch('%@',{cache:'no-store',signal:AbortSignal.timeout(4000)});if(!r.ok)throw Error(r.status);const u=URL.createObjectURL(await r.blob());f.src=u;if(old)URL.revokeObjectURL(old);old=u;s.textContent='Received '+new Date().toLocaleTimeString();}catch(e){s.textContent='No frame: '+e.message;}setTimeout(tick,500)}tick();let queue=Promise.resolve();function send(data){queue=queue.catch(()=>{}).then(async()=>{try{const q=new URLSearchParams(data);const r=await fetch(location.pathname+'/input?'+q,{method:'POST',signal:AbortSignal.timeout(5000)});if(!r.ok)throw Error('Guest control unavailable ('+r.status+')');result.textContent='Input sent — verify the app responds';}catch(e){result.textContent=e.message;throw e;}});return queue;}document.getElementById('send').onclick=()=>send({text:box.value}).then(()=>box.value='').catch(()=>{});document.getElementById('run').onclick=()=>send({text:box.value+String.fromCharCode(10)}).then(()=>box.value='').catch(()=>{});document.getElementById('enter').onclick=()=>send({text:String.fromCharCode(10)}).catch(()=>{});document.getElementById('back').onclick=()=>send({text:'',key:'Backspace'}).catch(()=>{});box.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();document.getElementById('run').click();}};function pointer(kind,e,dy=0){const r=f.getBoundingClientRect();send({kind,x:(e.clientX-r.left)/r.width,y:(e.clientY-r.top)/r.height,dy}).catch(()=>{});}\nconst mode=document.getElementById('touch');\ndocument.getElementById('test').onclick=()=>send({kind:'test'}).catch(()=>{});\nlet active=null,lastMove=0;\nfunction coords(e){const r=f.getBoundingClientRect();return {x:Math.max(0,Math.min(1,(e.clientX-r.left)/r.width)),y:Math.max(0,Math.min(1,(e.clientY-r.top)/r.height))};}\nfunction touch(phase,e){return send({kind:'touch',phase,...(e?coords(e):{})}).catch(()=>{});}\nfunction cancel(){if(active===null)return;active=null;touch('cancelled');}\nf.addEventListener('pointerdown',e=>{if(e.button!==0)return;if(!mode.checked){pointer('click',e);return;}e.preventDefault();active=e.pointerId;lastMove=0;f.setPointerCapture(e.pointerId);touch('began',e);});\nf.addEventListener('pointermove',e=>{if(active!==e.pointerId||performance.now()-lastMove<80)return;lastMove=performance.now();touch('moved',e);});\nf.addEventListener('pointerup',e=>{if(active!==e.pointerId)return;active=null;touch('ended',e);});\nf.addEventListener('pointercancel',cancel);f.addEventListener('lostpointercapture',cancel);\nwindow.addEventListener('blur',cancel);document.addEventListener('visibilitychange',()=>{if(document.hidden)cancel();});mode.onchange=cancel;\nf.addEventListener('wheel',e=>{e.preventDefault();pointer('scroll',e,Math.max(-500,Math.min(500,e.deltaY)));},{passive:false});</script>", framePath];
     NSData *page = [html dataUsingEncoding:NSUTF8StringEncoding];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         for (;;) {

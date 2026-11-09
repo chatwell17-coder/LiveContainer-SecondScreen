@@ -12,6 +12,7 @@ on:
 
 jobs:
   build:
+    if: github.repository == 'LiveContainer/LiveContainer'
     name: Build using xcodebuild command
     runs-on: macos-latest
     env:

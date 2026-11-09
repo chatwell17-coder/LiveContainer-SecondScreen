@@ -19,16 +19,18 @@ jobs:
         run: |
           set -euo pipefail
           xcodebuild archive -project LiveContainer.xcodeproj -scheme LiveContainer -archivePath archive -sdk iphoneos -arch arm64 -configuration Release CODE_SIGNING_ALLOWED=NO 2>&1 | tee build.log
-      - name: Package IPAs using upstream script
+      - name: Export guest display module
         shell: bash
-        env:
-          archive_path: archive
-          scheme: LiveContainer
-        run: bash .github/build_github.sh
+        run: |
+          set -euo pipefail
+          cp archive.xcarchive/Products/Applications/LiveContainer.app/Frameworks/TweakLoader.dylib GuestDisplayTouch.dylib
+          test -s GuestDisplayTouch.dylib
+          file GuestDisplayTouch.dylib
+          shasum -a 256 GuestDisplayTouch.dylib
       - uses: actions/upload-artifact@v4
         with:
-          name: Guest-display-probe-IPAs
-          path: '*.ipa'
+          name: Guest-display-probe-module
+          path: GuestDisplayTouch.dylib
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
